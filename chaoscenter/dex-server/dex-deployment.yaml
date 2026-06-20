@@ -25,6 +25,13 @@ data:
         name: 'LitmusPortalAuthBackend'
         secret: ZXhhbXBsZS1hcHAtc2VjcmV0
 
+      - id: litmus-mcp2
+        redirectURIs:
+          - 'http://<MCP Server External URL>/oauth/callback'  # Replace with MCP server external URL
+          - 'http://localhost:8090/oauth/callback'             # Included for local testing purposes
+        name: 'Litmus MCP Server'
+        secret: bGl0bXVzLW1jcDItc2VjcmV0  # base64("litmus-mcp2-secret"), change in production
+
     oauth2:
         skipApprovalScreen: true
 
