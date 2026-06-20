@@ -11,4 +11,5 @@ import (
 func DexRouter(router *gin.Engine, service services.ApplicationService) {
 	router.GET("/dex/login", rest.DexLogin())
 	router.GET("/dex/callback", rest.DexCallback(service))
+	router.POST("/dex/exchange", rest.DexExchange(service))
 }

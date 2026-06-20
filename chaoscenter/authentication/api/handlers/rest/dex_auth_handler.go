@@ -203,3 +203,138 @@ func DexCallback(userService services.ApplicationService) gin.HandlerFunc {
 		c.Redirect(http.StatusPermanentRedirect, "/login?jwtToken="+jwtToken+"&projectID="+defaultProject+"&projectRole="+string(entities.RoleOwner))
 	}
 }
+
+// DexExchange		godoc
+//
+//	@Description	Exchanges a Dex id_token for a Litmus access token and default project ID.
+//	@Tags			DexRouter
+//	@Accept			json
+//	@Produce		json
+//	@Param			body	body	object{id_token=string}	true	"Dex id_token"
+//	@Failure		400	{object}	response.ErrInvalidRequest
+//	@Failure		401	{object}	response.ErrUnauthorized
+//	@Failure		500	{object}	response.ErrServerError
+//	@Success		200	{object}	object{accessToken=string,projectID=string,projectRole=string,type=string}
+//	@Router			/dex/exchange [post]
+//
+// DexExchange verifies a Dex id_token and returns a Litmus JWT plus the user's default project.
+// This is intended for server-side OAuth clients (e.g. the MCP server) that cannot use browser redirects.
+func DexExchange(userService services.ApplicationService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req struct {
+			IDToken string `json:"id_token" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(utils.ErrorStatusCodes[utils.ErrInvalidRequest], presenter.CreateErrorResponse(utils.ErrInvalidRequest))
+			return
+		}
+
+		_, verifier, err := oAuthDexConfig()
+		if err != nil {
+			log.Error(err)
+			c.JSON(utils.ErrorStatusCodes[utils.ErrServerError], presenter.CreateErrorResponse(utils.ErrServerError))
+			return
+		}
+
+		idToken, err := verifier.Verify(c, req.IDToken)
+		if err != nil {
+			log.Errorf("OAuth Error: failed to verify id_token: %v", err)
+			c.JSON(utils.ErrorStatusCodes[utils.ErrUnauthorized], presenter.CreateErrorResponse(utils.ErrUnauthorized))
+			return
+		}
+
+		var claims struct {
+			Name  string `json:"name"`
+			Email string `json:"email"`
+		}
+		if err := idToken.Claims(&claims); err != nil {
+			log.Error("OAuth Error: claims not found")
+			c.JSON(utils.ErrorStatusCodes[utils.ErrServerError], presenter.CreateErrorResponse(utils.ErrServerError))
+			return
+		}
+
+		createdAt := time.Now().UnixMilli()
+		userData := entities.User{
+			Name:     claims.Name,
+			Email:    claims.Email,
+			Username: claims.Email,
+			Role:     entities.RoleUser,
+			Audit: entities.Audit{
+				CreatedAt: createdAt,
+				UpdatedAt: createdAt,
+			},
+		}
+
+		signedInUser, err := userService.LoginUser(&userData)
+		if err != nil {
+			log.Error(err)
+			c.JSON(utils.ErrorStatusCodes[utils.ErrServerError], presenter.CreateErrorResponse(utils.ErrServerError))
+			return
+		}
+
+		salt, err := userService.GetConfig("salt")
+		if err != nil {
+			log.Error(err)
+			c.JSON(utils.ErrorStatusCodes[utils.ErrServerError], presenter.CreateErrorResponse(utils.ErrServerError))
+			return
+		}
+
+		jwtToken, err := userService.GetSignedJWT(signedInUser, salt.Value)
+		if err != nil {
+			log.Error(err)
+			c.JSON(utils.ErrorStatusCodes[utils.ErrServerError], presenter.CreateErrorResponse(utils.ErrServerError))
+			return
+		}
+
+		var defaultProject string
+		ownerProjects, err := userService.GetOwnerProjectIDs(c, signedInUser.ID)
+		if err == nil && len(ownerProjects) > 0 {
+			defaultProject = ownerProjects[0].ID
+		} else {
+			newMember := &entities.Member{
+				UserID:     signedInUser.ID,
+				Role:       entities.RoleOwner,
+				Invitation: entities.AcceptedInvitation,
+				Username:   signedInUser.Username,
+				Name:       signedInUser.Name,
+				Email:      signedInUser.Email,
+				JoinedAt:   time.Now().UnixMilli(),
+			}
+			state := "active"
+			newProject := &entities.Project{
+				ID:      uuid.Must(uuid.NewRandom()).String(),
+				Name:    signedInUser.Username + "-project",
+				Members: []*entities.Member{newMember},
+				State:   &state,
+				Audit: entities.Audit{
+					IsRemoved: false,
+					CreatedAt: time.Now().UnixMilli(),
+					CreatedBy: entities.UserDetailResponse{
+						Username: signedInUser.Username,
+						UserID:   signedInUser.ID,
+						Email:    signedInUser.Email,
+					},
+					UpdatedAt: time.Now().UnixMilli(),
+					UpdatedBy: entities.UserDetailResponse{
+						Username: signedInUser.Username,
+						UserID:   signedInUser.ID,
+						Email:    signedInUser.Email,
+					},
+				},
+			}
+			if err := userService.CreateProject(newProject); err != nil {
+				log.Error(err)
+				c.JSON(utils.ErrorStatusCodes[utils.ErrServerError], presenter.CreateErrorResponse(utils.ErrServerError))
+				return
+			}
+			defaultProject = newProject.ID
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"accessToken": jwtToken,
+			"projectID":   defaultProject,
+			"projectRole": string(entities.RoleOwner),
+			"type":        "Bearer",
+		})
+	}
+}
